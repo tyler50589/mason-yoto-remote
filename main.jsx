@@ -215,6 +215,7 @@ function App() {
     setConnection("connecting");
     setEvent({});
     setStatus({});
+    setLivePosition(0);
 
     const client = mqtt.connect(MQTT_URL, {
       keepalive: 300,
@@ -227,38 +228,8 @@ function App() {
       reconnectPeriod: 1000,
       queueQoSZero: true,
       clean: true,
-});
-    useEffect(() => {
-  const timer = window.setInterval(() => {
-    setLivePosition((current) => {
-      const isPaused =
-        event.playbackStatus === "paused" ||
-        String(status.playingStatus || "")
-          .toLowerCase()
-          .includes("pause");
-
-      if (isPaused || !event.cardId) {
-        return current;
-      }
-
-      const trackLength = Number(event.trackLength || 0);
-      const next = current + 1;
-
-      if (trackLength > 0) {
-        return Math.min(next, trackLength);
-      }
-
-      return next;
     });
-  }, 1000);
 
-  return () => window.clearInterval(timer);
-}, [
-  event.playbackStatus,
-  event.cardId,
-  event.trackLength,
-  status.playingStatus,
-]);
     clientRef.current = client;
 
     const base = `device/${deviceId}`;
@@ -289,11 +260,13 @@ function App() {
       try {
         const data = JSON.parse(payload.toString());
         if (topic.endsWith("/data/events")) {
-        setEvent(data);
-
-  if (Number.isFinite(Number(data.position))) {
+          setEvent(data);
+          if (Number.isFinite(Number(data.position))) {
             setLivePosition(Number(data.position));
-  }
+          }
+          if (Number.isFinite(Number(data.volume))) {
+            setVolume(Number(data.volume));
+          }
         } else if (topic.endsWith("/data/status")) {
           const playerStatus = data.status || {};
           setStatus(playerStatus);
@@ -319,6 +292,29 @@ function App() {
       client.end(true);
     };
   }, [tokens?.access_token, deviceId]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLivePosition((current) => {
+        const paused =
+          event.playbackStatus === "paused" ||
+          String(status.playingStatus || "").toLowerCase().includes("pause");
+
+        if (paused || !event.cardId) return current;
+
+        const next = current + 1;
+        const trackLength = Number(event.trackLength || 0);
+        return trackLength > 0 ? Math.min(next, trackLength) : next;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    event.playbackStatus,
+    event.cardId,
+    event.trackLength,
+    status.playingStatus,
+  ]);
 
   function publish(command, payload = {}) {
     const client = clientRef.current;
@@ -358,7 +354,7 @@ function App() {
     const cardId = event.cardId || status.activeCard;
     const chapterKey = event.chapterKey;
     const trackKey = event.trackKey;
-    const currentPosition = Number(event.position);
+    const currentPosition = Number(livePosition);
 
     if (!cardId || !chapterKey || !trackKey || !Number.isFinite(currentPosition)) {
       setMessage(
@@ -373,12 +369,6 @@ function App() {
       Math.min(Number(event.trackLength || Infinity), currentPosition + delta)
     );
 
-    /*
-      Yoto's card/start command requires a URI. For library cards the public API
-      commonly identifies the active card by cardId, represented here as yoto:#<id>.
-      If Yoto changes this URI convention, pause/volume will still work and this
-      function is the only place that needs adjustment.
-    */
     publish("card/start", {
       uri: `yoto:#${cardId}`,
       chapterKey,
