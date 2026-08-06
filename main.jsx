@@ -140,8 +140,10 @@ function App() {
   const [livePosition, setLivePosition] = useState(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(true);
+
   const clientRef = useRef(null);
-  const volumeTimer = useRef(null);
+  const volumeTimerRef = useRef(null);
+  const volumePendingUntilRef = useRef(0);
   const playbackAnchorRef = useRef({ position: 0, receivedAt: Date.now() });
 
   const selectedDevice = useMemo(
@@ -154,11 +156,7 @@ function App() {
       try {
         const callbackTokens = await completeLogin();
         let current = callbackTokens || storage.getTokens();
-
-        if (current && tokenExpired(current)) {
-          current = await refreshTokens(current);
-        }
-
+        if (current && tokenExpired(current)) current = await refreshTokens(current);
         setTokens(current);
       } catch (error) {
         storage.clear();
@@ -193,13 +191,12 @@ function App() {
         const data = await response.json();
         const list = data.devices || [];
         setDevices(list);
-
         const saved = localStorage.getItem("selected_yoto_device");
-        const initial =
+        setDeviceId(
           list.find((device) => device.deviceId === saved)?.deviceId ||
-          list[0]?.deviceId ||
-          "";
-        setDeviceId(initial);
+            list[0]?.deviceId ||
+            ""
+        );
       } catch (error) {
         setMessage(error.message);
       }
@@ -233,18 +230,15 @@ function App() {
     });
 
     clientRef.current = client;
-
     const base = `device/${deviceId}`;
-    const topics = [
-      `${base}/data/events`,
-      `${base}/data/status`,
-      `${base}/response`,
-    ];
+    const eventTopic = `${base}/data/events`;
+    const statusTopic = `${base}/data/status`;
+    const responseTopic = `${base}/response`;
 
     client.on("connect", () => {
       setConnection("connected");
       setMessage("");
-      client.subscribe(topics, (error) => {
+      client.subscribe([eventTopic, statusTopic, responseTopic], (error) => {
         if (error) {
           setMessage(`Could not subscribe to the Player: ${error.message}`);
           return;
@@ -256,12 +250,15 @@ function App() {
 
     client.on("reconnect", () => setConnection("connecting"));
     client.on("offline", () => setConnection("offline"));
-    client.on("error", (error) => setMessage(`Player connection error: ${error.message}`));
+    client.on("error", (error) =>
+      setMessage(`Player connection error: ${error.message}`)
+    );
 
     client.on("message", (topic, payload) => {
       try {
         const data = JSON.parse(payload.toString());
-        if (topic.endsWith("/data/events")) {
+
+        if (topic === eventTopic) {
           setEvent(data);
           if (Number.isFinite(Number(data.position))) {
             const reportedPosition = Number(data.position);
@@ -271,20 +268,33 @@ function App() {
             };
             setLivePosition(reportedPosition);
           }
-          if (Number.isFinite(Number(data.volume))) {
-            setVolume(Number(data.volume));
-          }
-        } else if (topic.endsWith("/data/status")) {
+          // Do not copy data.volume into React state here. Yoto can send an
+          // older event snapshot immediately after a command, which was causing
+          // the control to jump back to 1.
+        } else if (topic === statusTopic) {
           const playerStatus = data.status || {};
           setStatus(playerStatus);
-          const reportedVolume =
-            playerStatus.userVolume ?? playerStatus.volume;
-          if (Number.isFinite(Number(reportedVolume))) {
-            setVolume(Number(reportedVolume));
+          const reportedVolume = Number(
+            playerStatus.userVolume ?? playerStatus.volume
+          );
+
+          if (
+            Date.now() >= volumePendingUntilRef.current &&
+            Number.isFinite(reportedVolume) &&
+            reportedVolume >= 0 &&
+            reportedVolume <= 100
+          ) {
+            setVolume(reportedVolume);
+          }
+        } else if (topic === responseTopic) {
+          const volumeResult = data?.status?.volume;
+          if (volumeResult === "FAIL") {
+            volumePendingUntilRef.current = 0;
+            setMessage("The Yoto Player rejected the volume command.");
           }
         }
       } catch {
-        // Some acknowledgements may not contain useful JSON for this UI.
+        // Ignore acknowledgements that are not useful JSON for this interface.
       }
     });
 
@@ -337,6 +347,7 @@ function App() {
       setMessage("The Yoto Player is not connected yet.");
       return false;
     }
+
     client.publish(
       `device/${deviceId}/command/${command}`,
       JSON.stringify(payload),
@@ -354,7 +365,6 @@ function App() {
       position: livePosition,
       receivedAt: Date.now(),
     };
-
     publish(paused ? "card/resume" : "card/pause");
     setEvent((previous) => ({
       ...previous,
@@ -365,9 +375,18 @@ function App() {
   function setPlayerVolume(nextValue) {
     const next = Math.max(0, Math.min(100, Math.round(Number(nextValue))));
     setVolume(next);
-    window.clearTimeout(volumeTimer.current);
-    volumeTimer.current = window.setTimeout(() => {
-      publish("volume/set", { volume: next });
+    setMessage("");
+
+    window.clearTimeout(volumeTimerRef.current);
+    volumeTimerRef.current = window.setTimeout(() => {
+      volumePendingUntilRef.current = Date.now() + 2500;
+      const sent = publish("volume/set", { volume: next });
+
+      if (sent) {
+        window.setTimeout(() => {
+          publish("status/request");
+        }, 700);
+      }
     }, 120);
   }
 
@@ -423,7 +442,11 @@ function App() {
   }
 
   if (busy) {
-    return <main className="shell"><section className="card loading">Opening remote…</section></main>;
+    return (
+      <main className="shell">
+        <section className="card loading">Opening remote…</section>
+      </main>
+    );
   }
 
   if (!tokens?.access_token) {
@@ -433,9 +456,7 @@ function App() {
           <div className="logo">Y</div>
           <p className="eyebrow">MASON'S</p>
           <h1>Yoto Remote</h1>
-          <p className="muted">
-            Control playback and volume from your phone.
-          </p>
+          <p className="muted">Control playback and volume from your phone.</p>
           {message && <div className="notice error">{message}</div>}
           <button className="primary connect" onClick={beginLogin}>
             Connect to Yoto
@@ -462,7 +483,11 @@ function App() {
             <p className="eyebrow">MASON'S</p>
             <h1>Yoto Remote</h1>
           </div>
-          <button className="iconButton" onClick={refreshPlayer} aria-label="Refresh player">
+          <button
+            className="iconButton"
+            onClick={refreshPlayer}
+            aria-label="Refresh player"
+          >
             ↻
           </button>
         </header>
@@ -481,7 +506,11 @@ function App() {
         )}
 
         <div className="connectionRow">
-          <span className={`dot ${connection === "connected" && online ? "good" : ""}`} />
+          <span
+            className={`dot ${
+              connection === "connected" && online ? "good" : ""
+            }`}
+          />
           <span>
             {selectedDevice?.name || "Yoto Player"} ·{" "}
             {connection === "connected" && online ? "Connected" : connection}
@@ -517,7 +546,11 @@ function App() {
             <span>15</span>
           </button>
 
-          <button className="playButton" onClick={togglePlayback} aria-label={isPaused ? "Play" : "Pause"}>
+          <button
+            className="playButton"
+            onClick={togglePlayback}
+            aria-label={isPaused ? "Play" : "Pause"}
+          >
             {isPaused ? "▶" : "Ⅱ"}
           </button>
 
@@ -533,7 +566,12 @@ function App() {
             <strong>{volume}%</strong>
           </div>
           <div className="volumeControls">
-            <button onClick={() => setPlayerVolume(volume - 5)} aria-label="Volume down">−</button>
+            <button
+              onClick={() => setPlayerVolume(volume - 5)}
+              aria-label="Volume down"
+            >
+              −
+            </button>
             <input
               type="range"
               min="0"
@@ -543,14 +581,21 @@ function App() {
               onChange={(e) => setPlayerVolume(e.target.value)}
               aria-label="Volume"
             />
-            <button onClick={() => setPlayerVolume(volume + 5)} aria-label="Volume up">+</button>
+            <button
+              onClick={() => setPlayerVolume(volume + 5)}
+              aria-label="Volume up"
+            >
+              +
+            </button>
           </div>
         </div>
 
         {message && <div className="notice error">{message}</div>}
 
         <footer>
-          <button className="textButton" onClick={logout}>Disconnect</button>
+          <button className="textButton" onClick={logout}>
+            Disconnect
+          </button>
         </footer>
       </section>
     </main>
