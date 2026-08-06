@@ -142,6 +142,7 @@ function App() {
   const [busy, setBusy] = useState(true);
   const clientRef = useRef(null);
   const volumeTimer = useRef(null);
+  const playbackAnchorRef = useRef({ position: 0, receivedAt: Date.now() });
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.deviceId === deviceId),
@@ -216,6 +217,7 @@ function App() {
     setEvent({});
     setStatus({});
     setLivePosition(0);
+    playbackAnchorRef.current = { position: 0, receivedAt: Date.now() };
 
     const client = mqtt.connect(MQTT_URL, {
       keepalive: 300,
@@ -262,7 +264,12 @@ function App() {
         if (topic.endsWith("/data/events")) {
           setEvent(data);
           if (Number.isFinite(Number(data.position))) {
-            setLivePosition(Number(data.position));
+            const reportedPosition = Number(data.position);
+            playbackAnchorRef.current = {
+              position: reportedPosition,
+              receivedAt: Date.now(),
+            };
+            setLivePosition(reportedPosition);
           }
           if (Number.isFinite(Number(data.volume))) {
             setVolume(Number(data.volume));
@@ -294,19 +301,27 @@ function App() {
   }, [tokens?.access_token, deviceId]);
 
   useEffect(() => {
+    const paused =
+      event.playbackStatus === "paused" ||
+      String(status.playingStatus || "").toLowerCase().includes("pause");
+
+    if (paused || !event.cardId) {
+      playbackAnchorRef.current = {
+        position: livePosition,
+        receivedAt: Date.now(),
+      };
+      return;
+    }
+
     const timer = window.setInterval(() => {
-      setLivePosition((current) => {
-        const paused =
-          event.playbackStatus === "paused" ||
-          String(status.playingStatus || "").toLowerCase().includes("pause");
-
-        if (paused || !event.cardId) return current;
-
-        const next = current + 1;
-        const trackLength = Number(event.trackLength || 0);
-        return trackLength > 0 ? Math.min(next, trackLength) : next;
-      });
-    }, 1000);
+      const anchor = playbackAnchorRef.current;
+      const elapsed = (Date.now() - anchor.receivedAt) / 1000;
+      const trackLength = Number(event.trackLength || 0);
+      const calculated = anchor.position + elapsed;
+      setLivePosition(
+        trackLength > 0 ? Math.min(calculated, trackLength) : calculated
+      );
+    }, 250);
 
     return () => window.clearInterval(timer);
   }, [
@@ -334,6 +349,12 @@ function App() {
     const paused =
       event.playbackStatus === "paused" ||
       String(status.playingStatus || "").toLowerCase().includes("pause");
+
+    playbackAnchorRef.current = {
+      position: livePosition,
+      receivedAt: Date.now(),
+    };
+
     publish(paused ? "card/resume" : "card/pause");
     setEvent((previous) => ({
       ...previous,
@@ -376,6 +397,10 @@ function App() {
       secondsIn: Math.floor(target),
     });
 
+    playbackAnchorRef.current = {
+      position: target,
+      receivedAt: Date.now(),
+    };
     setEvent((previous) => ({ ...previous, position: target }));
     setLivePosition(target);
   }
@@ -394,6 +419,7 @@ function App() {
     setEvent({});
     setStatus({});
     setLivePosition(0);
+    playbackAnchorRef.current = { position: 0, receivedAt: Date.now() };
   }
 
   if (busy) {
