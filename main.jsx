@@ -137,6 +137,7 @@ function App() {
   const [event, setEvent] = useState({});
   const [status, setStatus] = useState({});
   const [volume, setVolume] = useState(35);
+  const [livePosition, setLivePosition] = useState(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(true);
   const clientRef = useRef(null);
@@ -227,6 +228,37 @@ function App() {
       queueQoSZero: true,
       clean: true,
 });
+    useEffect(() => {
+  const timer = window.setInterval(() => {
+    setLivePosition((current) => {
+      const isPaused =
+        event.playbackStatus === "paused" ||
+        String(status.playingStatus || "")
+          .toLowerCase()
+          .includes("pause");
+
+      if (isPaused || !event.cardId) {
+        return current;
+      }
+
+      const trackLength = Number(event.trackLength || 0);
+      const next = current + 1;
+
+      if (trackLength > 0) {
+        return Math.min(next, trackLength);
+      }
+
+      return next;
+    });
+  }, 1000);
+
+  return () => window.clearInterval(timer);
+}, [
+  event.playbackStatus,
+  event.cardId,
+  event.trackLength,
+  status.playingStatus,
+]);
     clientRef.current = client;
 
     const base = `device/${deviceId}`;
@@ -257,10 +289,11 @@ function App() {
       try {
         const data = JSON.parse(payload.toString());
         if (topic.endsWith("/data/events")) {
-          setEvent(data);
-          if (Number.isFinite(Number(data.volume))) {
-            setVolume(Number(data.volume));
-          }
+        setEvent(data);
+
+  if (Number.isFinite(Number(data.position))) {
+            setLivePosition(Number(data.position));
+  }
         } else if (topic.endsWith("/data/status")) {
           const playerStatus = data.status || {};
           setStatus(playerStatus);
@@ -354,6 +387,7 @@ function App() {
     });
 
     setEvent((previous) => ({ ...previous, position: target }));
+    setLivePosition(target);
   }
 
   function refreshPlayer() {
@@ -369,6 +403,7 @@ function App() {
     setDeviceId("");
     setEvent({});
     setStatus({});
+    setLivePosition(0);
   }
 
   if (busy) {
@@ -400,7 +435,7 @@ function App() {
 
   const isPaused = event.playbackStatus === "paused";
   const online = selectedDevice?.online !== false;
-  const position = Number(event.position || 0);
+  const position = Number(livePosition || 0);
   const trackLength = Number(event.trackLength || 0);
 
   return (
