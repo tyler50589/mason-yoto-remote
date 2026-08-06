@@ -259,7 +259,7 @@ function App() {
         const data = JSON.parse(payload.toString());
 
         if (topic === eventTopic) {
-          setEvent(data);
+          setEvent((previous) => ({ ...previous, ...data }));
           if (Number.isFinite(Number(data.position))) {
             const reportedPosition = Number(data.position);
             playbackAnchorRef.current = {
@@ -268,12 +268,9 @@ function App() {
             };
             setLivePosition(reportedPosition);
           }
-          // Do not copy data.volume into React state here. Yoto can send an
-          // older event snapshot immediately after a command, which was causing
-          // the control to jump back to 1.
         } else if (topic === statusTopic) {
           const playerStatus = data.status || {};
-          setStatus(playerStatus);
+          setStatus((previous) => ({ ...previous, ...playerStatus }));
           const reportedVolume = Number(
             playerStatus.userVolume ?? playerStatus.volume
           );
