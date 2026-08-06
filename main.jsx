@@ -221,12 +221,12 @@ function App() {
       protocol: "wss",
       username: `${deviceId}?x-amz-customauthorizer-name=PublicJWTAuthorizer`,
       password: tokens.access_token,
+      clientId: `DASH${deviceId}`,
+      ALPNProtocols: ["x-amzn-mqtt-ca"],
       reconnectPeriod: 1000,
-      clientId: `DASH${deviceId}-${Math.random().toString(16).slice(2, 8)}`,
       queueQoSZero: true,
       clean: true,
-    });
-
+});
     clientRef.current = client;
 
     const base = `device/${deviceId}`;
