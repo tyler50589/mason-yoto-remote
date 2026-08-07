@@ -140,11 +140,18 @@ function App() {
   const [livePosition, setLivePosition] = useState(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(true);
-
   const clientRef = useRef(null);
   const volumeTimerRef = useRef(null);
   const volumePendingUntilRef = useRef(0);
   const playbackAnchorRef = useRef({ position: 0, receivedAt: Date.now() });
+  const mqttSessionIdRef = useRef(
+    sessionStorage.getItem("yoto_mqtt_session") ||
+      `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+  );
+
+  if (!sessionStorage.getItem("yoto_mqtt_session")) {
+    sessionStorage.setItem("yoto_mqtt_session", mqttSessionIdRef.current);
+  }
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.deviceId === deviceId),
@@ -222,23 +229,25 @@ function App() {
       protocol: "wss",
       username: `${deviceId}?x-amz-customauthorizer-name=PublicJWTAuthorizer`,
       password: tokens.access_token,
-      clientId: `DASH${deviceId}`,
-      ALPNProtocols: ["x-amzn-mqtt-ca"],
       reconnectPeriod: 1000,
+      clientId: `DASH${deviceId}-${mqttSessionIdRef.current}`,
+      ALPNProtocols: ["x-amzn-mqtt-ca"],
       queueQoSZero: true,
       clean: true,
     });
 
     clientRef.current = client;
     const base = `device/${deviceId}`;
-    const eventTopic = `${base}/data/events`;
-    const statusTopic = `${base}/data/status`;
-    const responseTopic = `${base}/response`;
+    const topics = [
+      `${base}/data/events`,
+      `${base}/data/status`,
+      `${base}/response`,
+    ];
 
     client.on("connect", () => {
       setConnection("connected");
       setMessage("");
-      client.subscribe([eventTopic, statusTopic, responseTopic], (error) => {
+      client.subscribe(topics, (error) => {
         if (error) {
           setMessage(`Could not subscribe to the Player: ${error.message}`);
           return;
@@ -257,8 +266,7 @@ function App() {
     client.on("message", (topic, payload) => {
       try {
         const data = JSON.parse(payload.toString());
-
-        if (topic === eventTopic) {
+        if (topic.endsWith("/data/events")) {
           setEvent((previous) => ({ ...previous, ...data }));
           if (Number.isFinite(Number(data.position))) {
             const reportedPosition = Number(data.position);
@@ -268,13 +276,12 @@ function App() {
             };
             setLivePosition(reportedPosition);
           }
-        } else if (topic === statusTopic) {
+        } else if (topic.endsWith("/data/status")) {
           const playerStatus = data.status || {};
           setStatus((previous) => ({ ...previous, ...playerStatus }));
           const reportedVolume = Number(
             playerStatus.userVolume ?? playerStatus.volume
           );
-
           if (
             Date.now() >= volumePendingUntilRef.current &&
             Number.isFinite(reportedVolume) &&
@@ -283,7 +290,7 @@ function App() {
           ) {
             setVolume(reportedVolume);
           }
-        } else if (topic === responseTopic) {
+        } else if (topic.endsWith("/response")) {
           const volumeResult = data?.status?.volume;
           if (volumeResult === "FAIL") {
             volumePendingUntilRef.current = 0;
@@ -344,7 +351,6 @@ function App() {
       setMessage("The Yoto Player is not connected yet.");
       return false;
     }
-
     client.publish(
       `device/${deviceId}/command/${command}`,
       JSON.stringify(payload),
@@ -357,7 +363,6 @@ function App() {
     const paused =
       event.playbackStatus === "paused" ||
       String(status.playingStatus || "").toLowerCase().includes("pause");
-
     playbackAnchorRef.current = {
       position: livePosition,
       receivedAt: Date.now(),
@@ -373,16 +378,12 @@ function App() {
     const next = Math.max(0, Math.min(100, Math.round(Number(nextValue))));
     setVolume(next);
     setMessage("");
-
     window.clearTimeout(volumeTimerRef.current);
     volumeTimerRef.current = window.setTimeout(() => {
       volumePendingUntilRef.current = Date.now() + 2500;
       const sent = publish("volume/set", { volume: next });
-
       if (sent) {
-        window.setTimeout(() => {
-          publish("status/request");
-        }, 700);
+        window.setTimeout(() => publish("status/request"), 700);
       }
     }, 120);
   }
